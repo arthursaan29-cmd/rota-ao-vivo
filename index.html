@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12263a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Rota">
+<title>Rota ao Vivo</title>
+<style>
+:root{--bg:#fff;--fg:#12263a;--mut:#66788a;--line:#dde4ea;--route:#0b7285;--stop:#f2a900;--dest:#e5484d;--me:#1f6feb;color-scheme:light}
+@media(prefers-color-scheme:dark){:root{--bg:#16222e;--fg:#edf2f7;--mut:#9fb0c0;--line:#2a3a4a;color-scheme:dark}}
+html,body{height:100%;margin:0;overflow:hidden;font:15px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--fg);background:var(--bg)}
+#map{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+.panel{position:absolute;left:8px;right:8px;z-index:10;background:var(--bg);border-radius:14px;box-shadow:0 2px 14px #0005;padding:10px;max-width:560px;margin:0 auto}
+#top{top:calc(8px + env(safe-area-inset-top,0px))}
+#bot{bottom:calc(8px + env(safe-area-inset-bottom,0px));max-height:44%;overflow:auto}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:8px}
+.seg button{flex:1;border:0;background:none;color:var(--mut);padding:9px;font:inherit;font-weight:600}
+.seg button.on{background:var(--fg);color:var(--bg)}
+input{flex:1;min-width:0;border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit;background:var(--bg);color:var(--fg)}
+button{font:inherit;color:var(--fg)}
+.go{border:0;border-radius:10px;background:var(--route);color:#fff;padding:10px 14px;font-weight:600}
+.ghost{border:1px solid var(--line);background:none;border-radius:10px;padding:8px 12px}
+.ghost.on{background:var(--me);border-color:var(--me);color:#fff}
+#res{list-style:none;margin:6px 0 0;padding:0;max-height:30vh;overflow:auto}
+#res li{padding:10px 4px;border-top:1px solid var(--line)}
+#sum{font-weight:700;margin-bottom:4px}
+#st{color:var(--mut);font-size:13px;margin-bottom:6px;min-height:1em}
+#pts{list-style:none;margin:0 0 8px;padding:0}
+#pts li{display:flex;gap:8px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
+#pts .n{flex:none;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:700;font-size:13px;background:var(--stop)}
+#pts .n.d{background:var(--dest)}
+#pts .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pts .x{border:0;background:none;color:var(--mut);font-size:20px;padding:0 6px}
+.zoom{position:absolute;right:10px;top:50%;transform:translateY(-50%);z-index:10;display:flex;flex-direction:column;gap:6px}
+.zoom button{width:44px;height:44px;border-radius:12px;border:0;background:var(--bg);box-shadow:0 2px 8px #0005;font-size:22px;font-weight:700}
+.attr{font-size:11px;color:var(--mut);margin-top:6px}
+</style>
+</head>
+<body>
+<canvas id="map"></canvas>
+
+<div id="top" class="panel">
+  <div class="seg"><button data-m="dest" class="on">Destino</button><button data-m="stop">+ Parada</button></div>
+  <div class="row" style="flex-wrap:nowrap"><input id="q" type="search" placeholder="Endereço, lugar ou coordenadas" enterkeyhint="search"><button class="go" id="bs">Buscar</button></div>
+  <ul id="res"></ul>
+</div>
+
+<div class="zoom"><button id="zi" aria-label="Aproximar">+</button><button id="zo" aria-label="Afastar">−</button></div>
+
+<div id="bot" class="panel">
+  <div id="sum">Defina um destino para traçar a rota</div>
+  <div id="st"></div>
+  <ul id="pts"></ul>
+  <div class="row">
+    <button class="ghost" id="bf">Seguir</button>
+    <button class="ghost" id="bo">Otimizar</button>
+    <button class="ghost" id="bm">Salvar mapa</button>
+    <button class="ghost" id="bc">Limpar</button>
+  </div>
+  <div class="attr">Mapa © OpenStreetMap · Segure o dedo no mapa para adicionar um ponto · Offline: digite coordenadas, ex.: -23.55, -46.63</div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const cv=$('#map'),g=cv.getContext('2d');
+const rad=Math.PI/180,dark=matchMedia('(prefers-color-scheme:dark)').matches;
+let W,H,dpr,z=4,cx=0,cy=0,mode='dest',dest=null,stops=[],me=null,follow=false,firstFix=true,path=[],straight=false,leg=0,lastRoute=0,lastPos=null,busy=false;
+
+/* ---------- utilidades ---------- */
+const say=t=>$('#st').textContent=t||'';
+const km=m=>m<1000?Math.round(m)+' m':(m/1000).toFixed(m<10000?1:0).replace('.',',')+' km';
+const dur=s=>{const m=Math.round(s/60);return m<60?m+' min':Math.floor(m/60)+' h '+String(m%60).padStart(2,'0')+' min'};
+const coords=a=>a.map(p=>p.lng.toFixed(6)+','+p.lat.toFixed(6)).join(';');
+const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+const hav=(a,b)=>{const dl=(b.lat-a.lat)*rad,dn=(b.lng-a.lng)*rad,s=Math.sin(dl/2)**2+Math.cos(a.lat*rad)*Math.cos(b.lat*rad)*Math.sin(dn/2)**2;return 12742000*Math.asin(Math.sqrt(s))};
+const arrow=(a,b)=>{const dn=(b.lng-a.lng)*rad,y=Math.sin(dn)*Math.cos(b.lat*rad),x=Math.cos(a.lat*rad)*Math.sin(b.lat*rad)-Math.sin(a.lat*rad)*Math.cos(b.lat*rad)*Math.cos(dn);return '↑↗→↘↓↙←↖'[Math.round(((Math.atan2(y,x)/rad+360)%360)/45)%8]};
+const getJSON=async u=>{const ac=new AbortController(),t=setTimeout(()=>ac.abort(),7000);try{return await (await fetch(u,{signal:ac.signal})).json()}finally{clearTimeout(t)}};
+const proj=(lat,lng,zz=z)=>{const s=256*2**zz,r=Math.max(-85,Math.min(85,lat))*rad;return[(lng+180)/360*s,(1-Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2*s]};
+const unproj=(x,y)=>{const s=256*2**z,n=Math.PI-2*Math.PI*y/s;return{lat:Math.atan(Math.sinh(n))/rad,lng:x/s*360-180}};
+const scr=p=>{const[x,y]=proj(p.lat,p.lng);return[x-cx+W/2,y-cy+H/2]};
+const centerOn=p=>{[cx,cy]=proj(p.lat,p.lng)};
+
+/* ---------- cache de blocos do mapa (funciona offline) ---------- */
+const dbp=new Promise(res=>{try{const r=indexedDB.open('rota-tiles',1);r.onupgradeneeded=()=>r.result.createObjectStore('t');r.onsuccess=()=>res(r.result);r.onerror=()=>res(null)}catch(e){res(null)}});
+const dbGet=async k=>{const d=await dbp;return d?new Promise(r=>{const q=d.transaction('t').objectStore('t').get(k);q.onsuccess=()=>r(q.result||null);q.onerror=()=>r(null)}):null};
+const dbPut=async(k,b)=>{const d=await dbp;return d?new Promise(r=>{try{const t=d.transaction('t','readwrite');t.objectStore('t').put(b,k);t.oncomplete=t.onerror=()=>r()}catch(e){r()}}):0};
+const tiles=new Map();
+function getTile(zz,x,y){
+  const k=`${zz}/${x}/${y}`;let t=tiles.get(k);
+  if(!t){
+    if(tiles.size>300){const o=tiles.keys().next().value;tiles.get(o).img?.close?.();tiles.delete(o)}
+    t={};tiles.set(k,t);loadTile(k,t);
+  }else if(t.err&&Date.now()-t.err>15000){t.err=0;loadTile(k,t)}
+  return t.img;
+}
+async function loadTile(k,t){
+  try{
+    let b=await dbGet(k);
+    if(!b){const r=await fetch(`https://tile.openstreetmap.org/${k}.png`);if(!r.ok)throw 0;b=await r.blob();dbPut(k,b)}
+    t.img=await createImageBitmap(b);draw();
+  }catch(e){t.err=Date.now()}
+}
+async function saveArea(){
+  const list=[];
+  for(let zz=z;zz<=Math.min(z+2,17);zz++){
+    const f=2**(zz-z),n=2**zz,add=[];
+    for(let x=Math.floor((cx-W/2)*f/256);x<=Math.floor((cx+W/2)*f/256);x++)
+      for(let y=Math.max(0,Math.floor((cy-H/2)*f/256));y<=Math.min(n-1,Math.floor((cy+H/2)*f/256));y++)add.push([zz,((x%n)+n)%n,y]);
+    if(list.length+add.length>160)break;list.push(...add);
+  }
+  let i=0;
+  for(const[zz,x,y]of list){
+    say(`Salvando mapa… ${++i}/${list.length}`);
+    const k=`${zz}/${x}/${y}`;
+    try{if(!await dbGet(k)){const r=await fetch(`https://tile.openstreetmap.org/${k}.png`);if(!r.ok)throw 0;await dbPut(k,await r.blob())}}
+    catch(e){say('Sem internet para salvar o mapa agora.');return}
+  }
+  say(`Mapa salvo: ${list.length} blocos desta área, disponíveis offline.`);
+}
+
+/* ---------- desenho ---------- */
+let raf=0;const draw=()=>{if(!raf)raf=requestAnimationFrame(paint)};
+function dot(p,r,color,txt){
+  const[x,y]=scr(p);g.beginPath();g.arc(x,y,r,0,7);g.fillStyle=color;g.fill();g.lineWidth=2.5;g.strokeStyle='#fff';g.stroke();
+  if(txt){g.fillStyle='#fff';g.font='700 13px system-ui';g.textAlign='center';g.textBaseline='middle';g.fillText(txt,x,y+1)}
+}
+function paint(){
+  raf=0;g.setTransform(dpr,0,0,dpr,0,0);
+  g.fillStyle=dark?'#1d2a36':'#e6ebef';g.fillRect(0,0,W,H);
+  const n=2**z,x0=Math.floor((cx-W/2)/256),x1=Math.floor((cx+W/2)/256),y0=Math.max(0,Math.floor((cy-H/2)/256)),y1=Math.min(n-1,Math.floor((cy+H/2)/256));
+  g.strokeStyle=dark?'#2a3a4a':'#d3dbe2';g.lineWidth=1;
+  for(let x=x0;x<=x1;x++)for(let y=y0;y<=y1;y++){
+    const im=getTile(z,((x%n)+n)%n,y),px=x*256-cx+W/2,py=y*256-cy+H/2;
+    if(im)g.drawImage(im,px,py,256,256);else g.strokeRect(px+.5,py+.5,255,255);
+  }
+  if(path.length>1){
+    g.beginPath();path.forEach((p,i)=>{const[x,y]=scr(p);i?g.lineTo(x,y):g.moveTo(x,y)});
+    g.lineJoin=g.lineCap='round';
+    g.setLineDash([]);g.strokeStyle='#fff';g.lineWidth=9;g.stroke();
+    g.setLineDash(straight?[12,9]:[]);g.strokeStyle='#0b7285';g.lineWidth=5;g.stroke();g.setLineDash([]);
+  }
+  stops.forEach((s,i)=>dot(s,13,'#f2a900',i+1));
+  if(dest)dot(dest,14,'#e5484d','★');
+  if(me){
+    const[x,y]=scr(me),r=(me.acc||0)/(156543.03*Math.cos(me.lat*rad)/2**z);
+    if(r>10){g.beginPath();g.arc(x,y,r,0,7);g.fillStyle='#1f6feb22';g.fill()}
+    dot(me,8,'#1f6feb');
+  }
+}
+function size(){dpr=devicePixelRatio||1;W=innerWidth;H=innerHeight;cv.width=W*dpr;cv.height=H*dpr;draw()}
+addEventListener('resize',size);
+
+function zoomBy(d){const nz=Math.max(2,Math.min(18,z+d));if(nz===z)return;const f=2**(nz-z);cx*=f;cy*=f;z=nz;draw()}
+function fit(){
+  if(path.length<2)return;
+  let a=90,b=-90,c=180,d=-180;path.forEach(p=>{a=Math.min(a,p.lat);b=Math.max(b,p.lat);c=Math.min(c,p.lng);d=Math.max(d,p.lng)});
+  z=2;
+  for(let zz=17;zz>=2;zz--){const[x0,y0]=proj(b,c,zz),[x1,y1]=proj(a,d,zz);if(x1-x0<W-80&&y1-y0<H-320){z=zz;break}}
+  centerOn({lat:(a+b)/2,lng:(c+d)/2});draw();
+}
+
+/* ---------- gestos: arrastar, pinça e toque longo ---------- */
+const ptr=new Map();let lp,moved=0,pd=0;
+const d2=()=>{const[a,b]=[...ptr.values()];return Math.hypot(a[0]-b[0],a[1]-b[1])};
+cv.addEventListener('pointerdown',e=>{
+  cv.setPointerCapture(e.pointerId);ptr.set(e.pointerId,[e.clientX,e.clientY]);moved=0;clearTimeout(lp);
+  if(ptr.size===1)lp=setTimeout(()=>{if(moved<8&&ptr.size===1){navigator.vibrate&&navigator.vibrate(30);addAt(e.clientX,e.clientY)}},550);
+  else pd=d2();
+});
+cv.addEventListener('pointermove',e=>{
+  const o=ptr.get(e.pointerId);if(!o)return;
+  const dx=e.clientX-o[0],dy=e.clientY-o[1];ptr.set(e.pointerId,[e.clientX,e.clientY]);
+  if(ptr.size===1){moved+=Math.abs(dx)+Math.abs(dy);cx-=dx;cy-=dy;if(moved>8&&follow)setFollow(false)}
+  else if(ptr.size===2&&pd){const r=d2()/pd;if(r>1.6){zoomBy(1);pd=d2()}else if(r<.62){zoomBy(-1);pd=d2()}}
+  draw();
+});
+const up=e=>{ptr.delete(e.pointerId);clearTimeout(lp);pd=0};
+cv.addEventListener('pointerup',up);cv.addEventListener('pointercancel',up);
+cv.addEventListener('wheel',e=>{e.preventDefault();zoomBy(e.deltaY<0?1:-1)},{passive:false});
+function addAt(sx,sy){
+  const p=unproj(cx+sx-W/2,cy+sy-H/2);
+  add({name:`Ponto ${p.lat.toFixed(4)}, ${p.lng.toFixed(4)}`,lat:p.lat,lng:p.lng});
+}
+
+/* ---------- pontos ---------- */
+document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{
+  mode=b.dataset.m;document.querySelectorAll('.seg button').forEach(x=>x.classList.toggle('on',x===b));
+});
+function add(p){if(mode==='dest')dest=p;else stops.push(p);render();route(true)}
+function reset(){path=[];$('#sum').textContent='Defina um destino para traçar a rota';say('');draw()}
+function render(){
+  const ul=$('#pts');ul.replaceChildren();
+  stops.forEach((s,i)=>{
+    const li=el('li'),x=el('button','x','×');x.setAttribute('aria-label','Remover parada');
+    x.onclick=()=>{stops.splice(i,1);render();dest?route(true):reset()};
+    li.append(el('span','n',i+1),el('span','t',s.name),x);ul.append(li);
+  });
+  if(dest){
+    const li=el('li'),x=el('button','x','×');x.setAttribute('aria-label','Remover destino');
+    x.onclick=()=>{dest=null;render();reset()};
+    li.append(el('span','n d','★'),el('span','t',dest.name),x);ul.append(li);
+  }
+  draw();
+}
+
+/* ---------- busca (coordenadas funcionam offline) ---------- */
+async function search(){
+  const q=$('#q').value.trim();if(!q)return;
+  const ul=$('#res');
+  const m=q.match(/^(-?\d+(?:[.,]\d+)?)\s*[;,\s]\s*(-?\d+(?:[.,]\d+)?)$/);
+  if(m){
+    const lat=parseFloat(m[1].replace(',','.')),lng=parseFloat(m[2].replace(',','.'));
+    if(Math.abs(lat)<=90&&Math.abs(lng)<=180){$('#q').value='';ul.replaceChildren();add({name:`Ponto ${lat.toFixed(4)}, ${lng.toFixed(4)}`,lat,lng});centerOn({lat,lng});draw();return}
+  }
+  ul.replaceChildren(el('li',null,'Buscando…'));
+  try{
+    const box=me?`&viewbox=${me.lng-1},${me.lat+1},${me.lng+1},${me.lat-1}`:'';
+    const r=await getJSON('https://nominatim.openstreetmap.org/search?format=json&limit=5&accept-language=pt-BR&q='+encodeURIComponent(q)+box);
+    ul.replaceChildren();
+    if(!r.length)return ul.append(el('li',null,'Nada encontrado. Tente outro nome ou adicione o bairro.'));
+    r.forEach(x=>{
+      const li=el('li',null,x.display_name);
+      li.onclick=()=>{ul.replaceChildren();$('#q').value='';const p={name:x.display_name.split(',').slice(0,2).join(','),lat:+x.lat,lng:+x.lon};add(p);centerOn(p);draw()};
+      ul.append(li);
+    });
+  }catch(e){ul.replaceChildren(el('li',null,'Sem internet para buscar endereços. Digite coordenadas (ex.: -23.55, -46.63) ou segure o dedo no mapa.'))}
+}
+$('#bs').onclick=search;
+$('#q').addEventListener('keydown',e=>{if(e.key==='Enter')search()});
+
+/* ---------- rota: ruas se houver internet, linha reta se não houver ---------- */
+async function route(doFit){
+  if(!dest||busy)return;
+  const pts=[...(me?[me]:[]),...stops,dest];
+  if(pts.length<2){say('Aguardando o GPS ou adicione outra parada.');draw();return}
+  busy=true;
+  try{
+    const r=await getJSON(`https://router.project-osrm.org/route/v1/driving/${coords(pts)}?overview=full&geometries=geojson`);
+    if(r.code!=='Ok')throw 0;
+    const rt=r.routes[0];
+    path=rt.geometry.coordinates.map(c=>({lat:c[1],lng:c[0]}));straight=false;leg=rt.legs[0].distance;
+    $('#sum').textContent=km(rt.distance)+' · '+dur(rt.duration);
+  }catch(e){
+    path=pts;straight=true;leg=hav(pts[0],pts[1]);
+    let d=0;for(let i=1;i<pts.length;i++)d+=hav(pts[i-1],pts[i]);
+    $('#sum').textContent='Linha reta · '+km(d);
+  }
+  const next=stops[0]||dest;
+  say(me?`${arrow(me,next)} Próximo: ${next.name} (${km(leg)})`+(straight?' · sem internet: linha reta':''):'Ative o GPS para navegar.');
+  lastRoute=Date.now();lastPos=me&&{...me};busy=false;
+  if(doFit&&!follow)fit();else draw();
+}
+async function optimize(){
+  if(!dest||stops.length<2){say('Adicione um destino e pelo menos 2 paradas.');return}
+  const pts=[...(me?[me]:[]),...stops,dest],off=me?1:0;let msg='Paradas reordenadas para o menor trajeto.';
+  try{
+    const r=await getJSON(`https://router.project-osrm.org/trip/v1/driving/${coords(pts)}?source=first&destination=last&roundtrip=false&overview=false`);
+    if(r.code!=='Ok')throw 0;
+    const order=r.waypoints.map((w,i)=>[w.waypoint_index,i]).sort((a,b)=>a[0]-b[0]).map(x=>x[1]);
+    stops=order.filter(i=>i>=off&&i<pts.length-1).map(i=>stops[i-off]);
+  }catch(e){
+    let cur=me||stops[0];const left=[...stops],out=[];
+    if(!me)out.push(left.shift());
+    while(left.length){let b=0;left.forEach((s,i)=>{if(hav(cur,s)<hav(cur,left[b]))b=i});cur=left.splice(b,1)[0];out.push(cur)}
+    stops=out;msg='Paradas reordenadas por proximidade (sem internet).';
+  }
+  render();await route(true);say(msg);
+}
+
+/* ---------- botões ---------- */
+function setFollow(v){follow=v;$('#bf').classList.toggle('on',v);if(v&&me){centerOn(me);z=Math.max(z,16)}draw()}
+$('#bf').onclick=()=>setFollow(!follow);
+$('#bo').onclick=optimize;
+$('#bm').onclick=saveArea;
+$('#bc').onclick=()=>{dest=null;stops=[];render();reset()};
+$('#zi').onclick=()=>zoomBy(1);$('#zo').onclick=()=>zoomBy(-1);
+
+/* ---------- posição ao vivo ---------- */
+if('geolocation' in navigator){
+  navigator.geolocation.watchPosition(p=>{
+    me={lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy};
+    if(firstFix){firstFix=false;centerOn(me);z=15}else if(follow)centerOn(me);
+    draw();
+    const hit=stops.findIndex(s=>hav(me,s)<40);
+    if(hit>=0){const n=stops[hit].name;stops.splice(hit,1);render();route(true);say('Parada concluída: '+n);return}
+    if(dest&&!stops.length&&hav(me,dest)<40){say('Você chegou ao destino.');return}
+    if(dest&&Date.now()-lastRoute>20000&&(!lastPos||hav(me,lastPos)>30))route(false);
+  },e=>say(e.code===1?'Permita o acesso à localização para ver o deslocamento ao vivo.':'GPS indisponível no momento.'),
+  {enableHighAccuracy:true,maximumAge:2000,timeout:20000});
+}else say('Este aparelho não tem GPS disponível no navegador.');
+
+[cx,cy]=proj(-14.2,-51.9);size();
+if('serviceWorker' in navigator&&location.protocol.startsWith('http'))addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+</script>
+</body>
+</html>
